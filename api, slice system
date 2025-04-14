@@ -1,0 +1,1124 @@
+I read the entire documentation of @redux/toolkit and understood the working of its following functions (not in the same order):
+- createAsyncThunk
+- createEntityAdapter
+- configureStore
+- createSlice
+- createDraftSafeSeclctor
+
+
+and made a system by using these, so that each time a developer doesn't need to write a lot of code for using this system I will give you some code snippets that uses these functions and some other to complete the system
+
+# Making asyncThunks
+
+<helpers.js>
+import { createAsyncThunk } from "@reduxjs/toolkit"
+import _ from "lodash"
+import moment from "moment"
+import { cacheAdapter } from "../adapters"
+
+export const createAsyncThunks = (sliceName, thunks) => {
+	const thunkCreators = {}
+	_.each(thunks, (creator, apiName) => {
+		const type = `${sliceName}/${apiName}`
+		const { payloadCreator, options = {}, dispatchAfterReject, cacheResult } = creator
+		let dispatchAfterFulfil = creator.dispatchAfterFulfil
+		thunkCreators[apiName] = createAsyncThunk(
+			type,
+			async (params, thunkApi) => {
+				const { dispatch, getState, rejectWithValue } = thunkApi
+				if (cacheResult) {
+					const { interval, path = type } = cacheResult
+					const cacheKey = `${path}/${JSON.stringify(params || '')}`
+					const { data, setAt } = cacheAdapter.getSelectors().selectById(getState().cache, cacheKey) || {}
+					if (setAt && moment().diff(moment.unix(setAt), 'minutes') < interval) {
+            dispatchAfterFulfil?.(params, thunkApi, { data })
+            return data
+					} else {
+						const incomingDispatchAfterFulfil = dispatchAfterFulfil
+						dispatchAfterFulfil = (params, thunkApi, response) => {
+							dispatch({
+								type: 'cache/setCache',
+								payload: {
+									key: cacheKey,
+									data: response.data,
+									setAt: moment().unix()
+								}
+							})
+              incomingDispatchAfterFulfil?.(params, thunkApi, response)
+						}
+					}
+				}
+				try {
+					const response = await payloadCreator(params, thunkApi)
+					dispatchAfterFulfil?.(params, thunkApi, response)
+					return response.data
+				} catch (error) {
+					dispatchAfterReject?.(params, thunkApi, error)
+					if (error.data) throw rejectWithValue(error.data)
+					else {
+						console.error(error)
+						throw rejectWithValue(error.message)
+					}
+				}
+			},
+			options
+		)
+	})
+	return thunkCreators
+}
+
+
+export const makeExtraReducers = (thunks, userThunkCreators) => (builder) => {
+	const builderMethods = ["addCases", "addMatchers", "addDefaultCases"]
+	_.each(thunks, (userApi, apiName) => {
+		_.each(builderMethods, (method) => {
+			const builderName = method.slice(0, -1)
+			const builderCases = userApi[method]
+			if (builderCases) {
+				_.each(builderCases, (caseBuilder, lifeCycle) => {
+					builder[builderName](
+						userThunkCreators[apiName][lifeCycle],
+						caseBuilder
+					)
+				})
+			}
+		})
+	})
+}
+</helpers.js>
+some apis
+
+siteThunks.addFilesApi = {
+	payloadCreator: ({ gid, files, accountGid }) => apiCall.post({
+		urlRoot: sitePath,
+		path: `/${gid}/add_files`,
+		data: { files, account_gid: accountGid },
+	}),
+}
+
+siteThunks.addSiteApi = {
+	payloadCreator: (params) => {
+		if (params.key) params.plugin_signup = true
+		return apiCall.post({
+			urlRoot: sitePath,
+			path: '/create',
+			data: params,
+		})
+	},
+	addCases: {
+		fulfilled: (state, action) => {
+			siteAdapter.upsertOne(state.sites, action.payload)
+		}
+	}
+}
+
+siteThunks.addImpUrlApi = {
+	payloadCreator: ({ gid, url }) => apiCall.post({
+		urlRoot: sitePath,
+		path: `/${gid}/add_imp_url`,
+		data: { imp_url: url },
+	}),
+	addCases: {
+		fulfilled: (state, action) => {
+			state.sites.entries[action.meta.arg.params.gid].settings = mergeData(state.sites.entries[action.meta.arg.params.gid]?.settings, { imp_urls: action.payload.imp_urls })
+		}
+	}
+}
+
+siteThunks.autoConnectGAApi = {
+	payloadCreator: (gid) => apiCall.post({
+		urlRoot: sitePath,
+		path: `/${gid}/autoconnect_ga`,
+	}),
+	dispatchAfterFulfil: (_args, thunkAPI, response) => {
+		const { dispatch } = thunkAPI
+		dispatch(updateAccount(response.data.account))
+	}
+}
+
+siteThunks.fetchFileVersionsApi = {
+	payloadCreator: ({ siteGid, filename }) => apiCall.get({
+		urlRoot: sitePath,
+		path: `/${siteGid}/fetch_file_versions`,
+		params: { filename: base64Encode(filename) },
+	}),
+	cacheResult: {
+		interval: 10,
+		path: `${sitesSliceName}/fetchFileVersions`,
+	},
+	addCases: {
+		fulfilled: (state, action) => {
+			const filename = action.meta.arg.params.filename
+			state.fileVersions[filename] = action.payload
+		}
+	}
+}
+
+export const siteAsyncThunks = createAsyncThunks(sitesSliceName, thunks)
+
+export const siteExtraReducers = makeExtraReducers(thunks, siteAsyncThunks)
+
+---
+
+<app/javascript/twilight/src/reducers/siteReducer.js>
+import { createSlice } from "@reduxjs/toolkit"
+import _ from "lodash"
+import { customWorkAdapter, siteAdapter, snapshotAdapter, stagingAdapter, wpUserAdapter } from "../adapters"
+import { siteExtraReducers, sitesSliceName } from "../apis/siteApi"
+
+const initialState = {
+	sites: siteAdapter.getInitialState(),
+	snapshots: snapshotAdapter.getInitialState(),
+	fileVersions: {},
+	stagingSites: stagingAdapter.getInitialState(),
+	wpUsers: wpUserAdapter.getInitialState(),
+	customWorks: customWorkAdapter.getInitialState(),
+}
+
+const siteReducer = createSlice({
+	name: sitesSliceName,
+	initialState,
+	reducers: {
+		deleteCustomWork: (state, action) => {
+			const { customWorkGid, siteGid } = action.payload
+			customWorkAdapter.removeOne(state.customWorks, customWorkGid)
+			state.sites.entities[siteGid].customWorks = state.customWorks.ids
+		},
+		upsertManyCustomWork: (state, action) => {
+			const { customWorks, siteGid } = action.payload
+			customWorkAdapter.upsertMany(state.customWorks, customWorks)
+			state.sites.entities[siteGid].customWorks = state.customWorks.ids
+		},
+		upsertManySites: (state, action) => {
+			siteAdapter.upsertMany(state.sites, action.payload)
+		},
+		upsertManySnapshots: (state, action) => {
+			const { snapshots, siteGid } = action.payload
+			snapshotAdapter.upsertMany(state.snapshots, snapshots)
+			const backups = state.sites.entities[siteGid].backups || {}
+			backups.snapshots = snapshots.map(snapshotAdapter.selectId)
+			state.sites.entities[siteGid].backups = backups
+		},
+		upsertOneCustomWork: (state, action) => {
+			const { customWork, siteGid } = action.payload
+			customWorkAdapter.upsertOne(state.customWorks, customWork)
+			state.sites.entities[siteGid].customWorks = state.customWorks.ids
+		},
+		upsertOneSnapshot: (state, action) => {
+			const { snapshot, siteGid } = action.payload
+			snapshotAdapter.upsertOne(state.snapshots, snapshot)
+			const backups = state.sites.entities[siteGid].backups || {}
+			backups.snapshots = backups.snapshots || []
+			backups.snapshots.push(snapshotAdapter.selectId(snapshot))
+			state.sites.entities[siteGid].backups = backups
+		},
+		upsertOneStaging: (state, action) => {
+			const stagingSite = action.payload
+			stagingAdapter.upsertOne(state.stagingSites, stagingSite)
+			state.sites.entities[stagingSite.blog_gid].staging = stagingSite.gid
+		},
+		updateOneSite: (state, action) => {
+			const { site, replace } = action.payload
+			if (replace) {
+				siteAdapter.setOne(state.sites, site)
+			} else {
+				siteAdapter.upsertOne(state.sites, action.payload)
+			}
+		},
+		updateSitesLabels: (state, action) => {
+			_.each(action.payload, (site, siteGid) => {
+				state.sites.entities[siteGid].labels = site.labels
+			})
+		},
+		updateSiteWith: (state, action) => {
+			const { key, value, gid } = action.payload
+			_.set(state.sites.entities[gid], key, value)
+		},
+	},
+	extraReducers: siteExtraReducers,
+})
+
+export const {
+	deleteCustomWork,
+	upsertManySites,
+	upsertManySnapshots,
+	upsertManyCustomWork,
+	upsertOneCustomWork,
+	upsertOneSnapshot,
+	upsertOneStaging,
+	updateOneSite,
+	updateSitesLabels,
+	updateSiteWith,
+} = siteReducer.actions
+
+export default siteReducer.reducer
+</app/javascript/twilight/src/reducers/siteReducer.js>
+
+---
+
+These are only few adapters, just to give you examples
+
+export const notificationAdapter = createEntityAdapter({
+	selectId: notification => notification.id,
+	sortComparer: (a, b) => b.updated_at.localeCompare(a.updated_at),
+})
+
+export const notificationModalAdapter = createEntityAdapter({
+	selectId: notification => notification.id,
+	sortComparer: (a, b) => b.updated_at.localeCompare(a.updated_at),
+})
+
+export const objectAdapter = createEntityAdapter({
+	selectId: object => `${object.object_klass}-${object.object_id}`,
+})
+
+---
+
+<app/javascript/twilight/src/reducers/selectors/siteSelectors.js>
+
+import { createDraftSafeSelector } from "@reduxjs/toolkit"
+import { customWorkAdapter, siteAdapter, snapshotAdapter, stagingAdapter } from "../../adapters"
+import { sitesSliceName } from "../../apis/siteApi"
+import _ from "lodash"
+
+
+export const {
+	selectById: selectSiteByGid,
+	selectIds: selectSiteGids,
+	selectEntities: selectSites,
+	selectAll: selectAllSites,
+	selectTotal: selectTotalSites,
+} = siteAdapter.getSelectors((state) => state[sitesSliceName].sites)
+
+export const getFromSite = (siteGid, path) => createDraftSafeSelector(
+	selectSiteByGid(siteGid),
+	(site) => _.get(site, path)
+)
+
+export const {
+	selectById: selectSnapshotById,
+	selectIds: selectSnapshotIds,
+	selectEntities: selectSnapshots,
+	selectAll: selectAllSnapshots,
+	selectTotal: selectTotalSnapshots,
+} = snapshotAdapter.getSelectors((state) => state[sitesSliceName].snapshots)
+
+export const selectSiteSnapshots = createDraftSafeSelector(
+	selectSites,
+	selectAllSnapshots,
+	(sites, allSnapshots) => (siteGid) => {
+		const site = sites[siteGid]
+		const snapshotsIds = site?.backups?.snapshots || []
+		return snapshotsIds.map((snapshotId) => allSnapshots[snapshotId])
+	}
+)
+
+export const {
+	selectById: selectStagingByGid,
+	selectIds: selectStagingGids,
+	selectEntities: selectStagingSites,
+	selectAll: selectAllStagingSites,
+} = stagingAdapter.getSelectors((state) => state[sitesSliceName].stagingSites)
+
+export const selectSiteStaging = createDraftSafeSelector(
+	selectSites,
+	selectAllStagingSites,
+	(sites, allStagingSites) => (siteGid) => {
+		const site = sites[siteGid]
+		const stagingId = site?.staging
+		return allStagingSites[stagingId]
+	}
+)
+
+export const selectAllCustomWorkOfSite = createDraftSafeSelector(
+	selectSites,
+	customWorkAdapter.getSelectors((state) => state[sitesSliceName].customWorks).selectAll,
+	(sites, allCustomWorks) => (siteGid) => {
+		const site = sites[siteGid]
+		const customWorkIds = site?.customWorks || []
+		return customWorkIds.map((customWorkId) => allCustomWorks[customWorkId])
+	}
+)
+</app/javascript/twilight/src/reducers/selectors/siteSelectors.js>
+
+Create a comprehensive and detailed documentation for Creating/Updating a slice. For each component or feature in Creating/Updating a slice, provide:
+
+A clear and thorough description of what it does
+Its exact data type and an exhaustive list of possible values or configurations
+Specific use cases for when and why to use this component or feature, including edge cases
+Multiple examples of how to implement it correctly in different scenarios
+Any potential pitfalls, limitations, or best practices associated with it
+How it interacts with other components or parts of the system
+
+For each 
+1. how to make extraReducers from the import, how to customise it.
+2. exporting reducers, selectors, actions
+3. all the use cases of a single reducer action and all the ways of creating with use case
+4. when to create extraReducers apart from the imported ones which should be made from makeExtraReducer function from helper getting from in api file inCreating/Updating a slice:
+
+List and explain all possible options that can be configured, including their types, default values, and use cases
+
+For each DATA_STRUCTURE and UTILITY_FUNCTION in Creating/Updating a slice:
+
+Explain all possible ways it can be used, including advanced use cases
+Detail its return value types and structures in various scenarios
+Provide multiple examples of how to utilize it in different situations
+Discuss any performance considerations or optimizations
+
+Please organize this information in a clear, structured manner, using headings, subheadings, and bullet points. Include code snippets to illustrate key points and variations in usage.
+
+Add a section on best practices and common patterns when using Creating/Updating a slice, including tips for optimization, error handling, and maintainability. Include examples of anti-patterns to avoid.
+
+Finally, include a troubleshooting section that addresses common issues developers might encounter when using Creating/Updating a slice, along with their solutions.
+
+
+---
+
+# Comprehensive Documentation for Creating/Updating a Slice
+
+## Table of Contents
+1. [Introduction](#introduction)
+2. [Creating a Slice](#creating-a-slice)
+3. [Updating a Slice](#updating-a-slice)
+4. [ExtraReducers](#extrareducers)
+5. [Exporting Reducers, Selectors, and Actions](#exporting-reducers-selectors-and-actions)
+6. [Reducer Actions](#reducer-actions)
+7. [Data Structures and Utility Functions](#data-structures-and-utility-functions)
+8. [Best Practices and Common Patterns](#best-practices-and-common-patterns)
+9. [Troubleshooting](#troubleshooting)
+
+## 1. Introduction
+
+This documentation provides a comprehensive guide to creating and updating slices using Redux Toolkit in the context of the provided system. It covers all aspects of slice creation, including reducers, extra reducers, selectors, and actions.
+
+## 2. Creating a Slice
+
+### Description
+Creating a slice involves defining the initial state, reducers, and extra reducers for a specific domain of your application state.
+
+### Data Type
+```typescript
+interface SliceOptions<State = any, CaseReducers extends SliceCaseReducers<State> = SliceCaseReducers<State>, Name extends string = string> {
+  name: Name
+  initialState: State | (() => State)
+  reducers: ValidateSliceCaseReducers<State, CaseReducers>
+  extraReducers?: CaseReducers<State, any> | ((builder: ActionReducerMapBuilder<State>) => void)
+}
+```
+
+### Use Cases
+- When you need to manage a specific domain of your application state
+- When you want to create actions and reducers for a particular feature
+
+### Example
+```javascript
+import { createSlice } from "@reduxjs/toolkit"
+import { siteAdapter } from "../adapters"
+import { siteExtraReducers, sitesSliceName } from "../apis/siteApi"
+
+const initialState = {
+  sites: siteAdapter.getInitialState(),
+  // ... other initial state properties
+}
+
+const siteReducer = createSlice({
+  name: sitesSliceName,
+  initialState,
+  reducers: {
+    updateOneSite: (state, action) => {
+      const { site, replace } = action.payload
+      if (replace) {
+        siteAdapter.setOne(state.sites, site)
+      } else {
+        siteAdapter.upsertOne(state.sites, action.payload)
+      }
+    },
+    // ... other reducers
+  },
+  extraReducers: siteExtraReducers,
+})
+```
+
+### Best Practices
+- Use meaningful names for your slice and reducers
+- Keep related state and reducers together in a single slice
+- Use entity adapters for normalized data structures
+
+## 3. Updating a Slice
+
+### Description
+Updating a slice involves modifying existing reducers, adding new reducers, or updating the initial state.
+
+### Use Cases
+- When you need to add new functionality to an existing feature
+- When you need to modify the behavior of existing reducers
+
+### Example
+```javascript
+const updatedSiteReducer = createSlice({
+  name: sitesSliceName,
+  initialState,
+  reducers: {
+    ...siteReducer.reducers,
+    newReducer: (state, action) => {
+      // New reducer logic
+    },
+  },
+  extraReducers: (builder) => {
+    siteExtraReducers(builder)
+    builder.addCase(newAsyncThunk.fulfilled, (state, action) => {
+      // Handle new async thunk
+    })
+  },
+})
+```
+
+### Best Practices
+- Avoid modifying existing reducers if possible; instead, add new reducers
+- Use immer for immutable state updates
+- Keep reducers pure and free of side effects
+
+## 4. ExtraReducers
+
+### Description
+ExtraReducers allow you to add additional case reducers to your slice that are not defined as part of the `reducers` field.
+
+### Data Type
+```typescript
+type ExtraReducers<State> = 
+  | CaseReducers<State, any>
+  | ((builder: ActionReducerMapBuilder<State>) => void)
+```
+
+### Use Cases
+- Handling actions from other slices or async thunks
+- Adding reducers for complex scenarios that don't fit into the standard reducer pattern
+
+### Example
+```javascript
+import { makeExtraReducers } from "../helpers"
+
+const thunks = {
+  fetchSitesApi: {
+    payloadCreator: () => apiCall.get({ /* ... */ }),
+    addCases: {
+      fulfilled: (state, action) => {
+        siteAdapter.setAll(state.sites, action.payload)
+      },
+    },
+  },
+  // ... other thunks
+}
+
+export const siteAsyncThunks = createAsyncThunks(sitesSliceName, thunks)
+export const siteExtraReducers = makeExtraReducers(thunks, siteAsyncThunks)
+
+// In the slice definition
+extraReducers: siteExtraReducers,
+```
+
+### Customization
+To customize extra reducers:
+
+1. Define additional cases in the `thunks` object
+2. Use the `builder` pattern for more complex scenarios
+
+```javascript
+extraReducers: (builder) => {
+  siteExtraReducers(builder)
+  builder.addCase(customAction, (state, action) => {
+    // Custom logic
+  })
+},
+```
+
+### Best Practices
+- Use `makeExtraReducers` for consistent handling of async thunks
+- Add custom cases using the `builder` pattern when needed
+- Keep extra reducers organized and related to the slice's domain
+
+## 5. Exporting Reducers, Selectors, and Actions
+
+### Description
+Exporting reducers, selectors, and actions makes them available for use in other parts of your application.
+
+### Example
+```javascript
+export const {
+  updateOneSite,
+  upsertManySites,
+  // ... other actions
+} = siteReducer.actions
+
+export default siteReducer.reducer
+
+// In a separate selectors file
+export const {
+  selectById: selectSiteByGid,
+  selectIds: selectSiteGids,
+  // ... other selectors
+} = siteAdapter.getSelectors((state) => state[sitesSliceName].sites)
+```
+
+### Best Practices
+- Export actions individually for better tree-shaking
+- Export the reducer as the default export
+- Create separate files for complex selectors
+
+## 6. Reducer Actions
+
+### Description
+Reducer actions are functions that describe how the state should change in response to an action.
+
+### Data Type
+```typescript
+type CaseReducer<S = any, A extends Action = AnyAction> = (state: Draft<S>, action: A) => S | void | Draft<S>
+```
+
+### Use Cases
+- Updating a single entity in the state
+- Adding or removing entities from the state
+- Updating nested properties of the state
+
+### Examples
+
+1. Updating a single entity:
+```javascript
+updateOneSite: (state, action) => {
+  const { site, replace } = action.payload
+  if (replace) {
+    siteAdapter.setOne(state.sites, site)
+  } else {
+    siteAdapter.upsertOne(state.sites, action.payload)
+  }
+},
+```
+
+2. Updating nested properties:
+```javascript
+updateSiteWith: (state, action) => {
+  const { key, value, gid } = action.payload
+  _.set(state.sites.entities[gid], key, value)
+},
+```
+
+3. Adding multiple entities:
+```javascript
+upsertManySites: (state, action) => {
+  siteAdapter.upsertMany(state.sites, action.payload)
+},
+```
+
+### Best Practices
+- Use entity adapter methods for CRUD operations on normalized data
+- Leverage immer for easy immutable updates
+- Keep reducers pure and focused on a single responsibility
+
+## 7. Data Structures and Utility Functions
+
+### Entity Adapters
+
+#### Description
+Entity adapters provide a standardized way to store and manage normalized data in the Redux store.
+
+#### Usage
+```javascript
+import { createEntityAdapter } from "@reduxjs/toolkit"
+
+export const siteAdapter = createEntityAdapter({
+  selectId: (site) => site.gid,
+  sortComparer: (a, b) => a.name.localeCompare(b.name),
+})
+
+// In the initial state
+sites: siteAdapter.getInitialState(),
+
+// In reducers
+siteAdapter.upsertOne(state.sites, action.payload)
+```
+
+#### Best Practices
+- Use entity adapters for collections of items with unique IDs
+- Leverage adapter methods for CRUD operations
+- Use adapter selectors for efficient data access
+
+### Selectors
+
+#### Description
+Selectors are functions that extract specific pieces of data from the store state.
+
+#### Usage
+```javascript
+import { createDraftSafeSelector } from "@reduxjs/toolkit"
+
+export const selectSiteSnapshots = createDraftSafeSelector(
+  selectSites,
+  selectAllSnapshots,
+  (sites, allSnapshots) => (siteGid) => {
+    const site = sites[siteGid]
+    const snapshotsIds = site?.backups?.snapshots || []
+    return snapshotsIds.map((snapshotId) => allSnapshots[snapshotId])
+  }
+)
+```
+
+#### Best Practices
+- Use `createDraftSafeSelector` for compatibility with Immer
+- Compose selectors for complex data derivation
+- Memoize selectors for performance optimization
+
+## 8. Best Practices and Common Patterns
+
+### Optimization
+- Use entity adapters for normalized data structures
+- Leverage memoized selectors for derived data
+- Avoid unnecessary state updates
+
+### Error Handling
+- Use `try-catch` blocks in async thunks
+- Dispatch error actions to update the state with error information
+- Use `rejectWithValue` in async thunks to pass error data to the reducer
+
+### Maintainability
+- Keep slices focused on a specific domain
+- Use meaningful names for actions and reducers
+- Document complex logic with comments
+
+### Anti-patterns to Avoid
+- Mutating state directly (outside of Immer)
+- Putting non-serializable values in the Redux store
+- Performing side effects in reducers
+
+## 9. Troubleshooting
+
+### Common Issues and Solutions
+
+1. State not updating as expected
+   - Ensure you're not mutating state directly
+   - Check that you're returning the new state or using Immer correctly
+
+2. Selectors returning stale data
+   - Verify that the selector is memoized correctly
+   - Check if the underlying state has actually changed
+
+3. Async thunks not dispatching actions
+   - Ensure the thunk is properly exported and used in the component
+   - Check for any errors in the API call or payload creation
+
+4. Performance issues with large state trees
+   - Use normalization and entity adapters
+   - Implement memoized selectors
+   - Consider using Redux Toolkit's `createEntityAdapter` for better performance
+
+5. Difficulty managing complex state updates
+   - Break down complex updates into smaller, more manageable reducers
+   - Use helper functions to encapsulate common update patterns
+   - Leverage Immer for easier immutable updates
+
+By following these guidelines and best practices, you can effectively create and manage Redux slices in your application, leading to more maintainable and performant state management.
+
+---
+
+# useApiCaller Hook Documentation
+
+The `useApiCaller` hook is a custom React hook designed to simplify API calls in React applications. It provides a streamlined way to manage API requests, handle loading states, and deal with success and error scenarios.
+
+## Hook Signature
+
+```javascript
+const useApiCaller = (apiFunc, initOptions = {}) => { ... }
+```
+
+### Parameters
+
+1. `apiFunc` (Function): The API function to be called. This should be a Redux thunk action creator.
+2. `initOptions` (Object): Initial options for the hook.
+   - `initLoading` (Boolean): Initial loading state. Default: `false`.
+   - `callOnInterval` (Object): Configuration for interval-based API calls.
+     - `interval` (Number): Interval in milliseconds between API calls.
+     - `breakInterval` (Function): Function to determine if the interval should be stopped.
+
+## Return Value
+
+The hook returns an object with the following properties:
+
+```javascript
+{
+  loading: Boolean,
+  data: Any,
+  error: Object | null,
+  callApi: Function
+}
+```
+
+### Properties
+
+1. `loading` (Boolean): Indicates whether an API request is in progress.
+2. `data` (Any): Contains the successful response data from the API call.
+3. `error` (Object | null): Contains error information if the API call fails.
+4. `callApi` (Function): Function to initiate the API call.
+
+## Usage
+
+```javascript
+const { loading, data, error, callApi } = useApiCaller(someApiFunction);
+
+// To make an API call
+callApi(params, options);
+```
+
+### `callApi` Function
+
+The `callApi` function accepts two parameters:
+
+1. `params` (Object): Parameters to be passed to the API function.
+2. `options` (Object): Additional options for the API call.
+   - `onInit` (Function): Called before the API request is made.
+   - `onSuccess` (Function): Called when the API call succeeds.
+   - `onError` (Function): Called when the API call fails.
+   - `onFinally` (Function): Called after the API call completes (success or failure).
+   - `successMessage` (String | Function | Boolean): Message to display on success.
+   - `errorMessage` (String | Function | Boolean): Message to display on error.
+
+## Use Cases
+
+1. **Simple API Call**: 
+   ```javascript
+   const { callApi } = useApiCaller(fetchUserData);
+   callApi({ userId: 123 });
+   ```
+
+2. **API Call with Success/Error Handling**:
+   ```javascript
+   const { callApi } = useApiCaller(updateUserProfile);
+   callApi(
+     { name: 'John Doe' },
+     { 
+       onSuccess: (data) => console.log('Profile updated', data),
+       onError: (error) => console.error('Update failed', error)
+     }
+   );
+   ```
+
+3. **Interval-based API Calls**:
+   ```javascript
+   const { callApi } = useApiCaller(fetchLiveData, {
+     callOnInterval: { interval: 5000 }
+   });
+   callApi();
+   ```
+
+4. **Custom Success/Error Messages**:
+   ```javascript
+   const { callApi } = useApiCaller(submitForm);
+   callApi(
+     formData,
+     { 
+       successMessage: 'Form submitted successfully!',
+       errorMessage: (error) => `Submission failed: ${error.message}`
+     }
+   );
+   ```
+
+## Detailed Entity Documentation
+
+### 1. `loading` (Boolean)
+
+- **Possible Values**: `true` or `false`
+- **Use Case**: Used to show loading indicators or disable UI elements during API calls.
+- **Example**:
+  ```javascript
+  const { loading } = useApiCaller(fetchData);
+  return loading ? <LoadingSpinner /> : <DataDisplay />;
+  ```
+
+### 2. `data` (Any)
+
+- **Possible Values**: Any data type returned by the API (Object, Array, String, Number, etc.)
+- **Use Case**: Stores the successful response from the API call.
+- **Example**:
+  ```javascript
+  const { data } = useApiCaller(fetchUserProfile);
+  return data ? <UserProfile user={data} /> : null;
+  ```
+
+### 3. `error` (Object | null)
+
+- **Possible Values**: Error object or `null`
+- **Use Case**: Contains error information when an API call fails.
+- **Example**:
+  ```javascript
+  const { error } = useApiCaller(fetchData);
+  return error ? <ErrorMessage message={error.message} /> : null;
+  ```
+
+### 4. `callApi` (Function)
+
+- **Parameters**:
+  - `params` (Object): API call parameters
+  - `options` (Object): Additional options
+- **Return Value**: Promise resolving to `[data, error]`
+- **Use Cases**:
+  1. **Basic Call**:
+     ```javascript
+     const { callApi } = useApiCaller(fetchUsers);
+     callApi({ page: 1 });
+     ```
+  2. **With Callbacks**:
+     ```javascript
+     callApi(
+       { id: 123 },
+       {
+         onSuccess: (data) => console.log('Success', data),
+         onError: (error) => console.error('Error', error),
+         onFinally: () => console.log('Call completed')
+       }
+     );
+     ```
+  3. **Custom Messages**:
+     ```javascript
+     callApi(
+       data,
+       {
+         successMessage: (responseData) => `Created item ${responseData.id}`,
+         errorMessage: true // Use default error message from API
+       }
+     );
+     ```
+  4. **Handling Return Value**:
+     ```javascript
+     const [data, error] = await callApi(params);
+     if (data) {
+       // Handle success
+     } else if (error) {
+       // Handle error
+     }
+     ```
+
+### 5. `initOptions` (Object)
+
+- **Properties**:
+  - `initLoading` (Boolean): Set initial loading state
+  - `callOnInterval` (Object): Configure interval-based calls
+    - `interval` (Number): Milliseconds between calls
+    - `breakInterval` (Function): Determine when to stop interval
+- **Use Cases**:
+  1. **Initial Loading State**:
+     ```javascript
+     const { loading } = useApiCaller(fetchInitialData, { initLoading: true });
+     ```
+  2. **Polling**:
+     ```javascript
+     const { callApi } = useApiCaller(pollStatus, {
+       callOnInterval: { 
+         interval: 5000,
+         breakInterval: ([data]) => data?.status === 'completed'
+       }
+     });
+     callApi();
+     ```
+
+This documentation provides a comprehensive overview of the `useApiCaller` hook, its parameters, return values, and various use cases. It should help developers understand how to effectively use this hook in their React applications for managing API calls efficiently.
+
+---
+
+# useApiCaller Hook Documentation
+
+The `useApiCaller` hook is a custom React hook designed to simplify API calls in React applications. It provides a streamlined way to manage API requests, handle loading states, and deal with success and error scenarios.
+
+## Hook Signature
+
+```javascript
+const useApiCaller = (apiFunc, initOptions = {}) => { ... }
+```
+
+### Parameters
+
+1. `apiFunc` (Function): The API function to be called. This should be a Redux thunk action creator.
+2. `initOptions` (Object): Initial options for the hook.
+   - `initLoading` (Boolean): Initial loading state. Default: `false`.
+   - `callOnInterval` (Object): Configuration for interval-based API calls.
+     - `interval` (Number): Interval in milliseconds between API calls.
+     - `breakInterval` (Function): Function to determine if the interval should be stopped.
+
+## Return Value
+
+The hook returns an object with the following properties:
+
+```javascript
+{
+  loading: Boolean,
+  data: Any,
+  error: Object | null,
+  callApi: Function
+}
+```
+
+### Properties
+
+1. `loading` (Boolean): Indicates whether an API request is in progress.
+2. `data` (Any): Contains the successful response data from the API call.
+3. `error` (Object | null): Contains error information if the API call fails.
+4. `callApi` (Function): Function to initiate the API call.
+
+## Usage
+
+```javascript
+const { loading, data, error, callApi } = useApiCaller(someApiFunction);
+
+// To make an API call
+callApi(params, options);
+```
+
+### `callApi` Function
+
+The `callApi` function accepts two parameters:
+
+1. `params` (Object): Parameters to be passed to the API function.
+2. `options` (Object): Additional options for the API call.
+   - `onInit` (Function): Called before the API request is made.
+   - `onSuccess` (Function): Called when the API call succeeds.
+   - `onError` (Function): Called when the API call fails.
+   - `onFinally` (Function): Called after the API call completes (success or failure).
+   - `successMessage` (String | Function | Boolean): Message to display on success.
+   - `errorMessage` (String | Function | Boolean): Message to display on error.
+
+## Use Cases
+
+1. **Simple API Call**: 
+   ```javascript
+   const { callApi } = useApiCaller(fetchUserData);
+   callApi({ userId: 123 });
+   ```
+
+2. **API Call with Success/Error Handling**:
+   ```javascript
+   const { callApi } = useApiCaller(updateUserProfile);
+   callApi(
+     { name: 'John Doe' },
+     { 
+       onSuccess: (data) => console.log('Profile updated', data),
+       onError: (error) => console.error('Update failed', error)
+     }
+   );
+   ```
+
+3. **Interval-based API Calls**:
+   ```javascript
+   const { callApi } = useApiCaller(fetchLiveData, {
+     callOnInterval: { interval: 5000 }
+   });
+   callApi();
+   ```
+
+4. **Custom Success/Error Messages**:
+   ```javascript
+   const { callApi } = useApiCaller(submitForm);
+   callApi(
+     formData,
+     { 
+       successMessage: 'Form submitted successfully!',
+       errorMessage: (error) => `Submission failed: ${error.message}`
+     }
+   );
+   ```
+
+## Detailed Entity Documentation
+
+### 1. `loading` (Boolean)
+
+- **Possible Values**: `true` or `false`
+- **Use Case**: Used to show loading indicators or disable UI elements during API calls.
+- **Example**:
+  ```javascript
+  const { loading } = useApiCaller(fetchData);
+  return loading ? <LoadingSpinner /> : <DataDisplay />;
+  ```
+
+### 2. `data` (Any)
+
+- **Possible Values**: Any data type returned by the API (Object, Array, String, Number, etc.)
+- **Use Case**: Stores the successful response from the API call.
+- **Example**:
+  ```javascript
+  const { data } = useApiCaller(fetchUserProfile);
+  return data ? <UserProfile user={data} /> : null;
+  ```
+
+### 3. `error` (Object | null)
+
+- **Possible Values**: Error object or `null`
+- **Use Case**: Contains error information when an API call fails.
+- **Example**:
+  ```javascript
+  const { error } = useApiCaller(fetchData);
+  return error ? <ErrorMessage message={error.message} /> : null;
+  ```
+
+### 4. `callApi` (Function)
+
+- **Parameters**:
+  - `params` (Object): API call parameters
+  - `options` (Object): Additional options
+- **Return Value**: Promise resolving to `[data, error]`
+- **Use Cases**:
+  1. **Basic Call**:
+     ```javascript
+     const { callApi } = useApiCaller(fetchUsers);
+     callApi({ page: 1 });
+     ```
+  2. **With Callbacks**:
+     ```javascript
+     callApi(
+       { id: 123 },
+       {
+         onSuccess: (data) => console.log('Success', data),
+         onError: (error) => console.error('Error', error),
+         onFinally: () => console.log('Call completed')
+       }
+     );
+     ```
+  3. **Custom Messages**:
+     ```javascript
+     callApi(
+       data,
+       {
+         successMessage: (responseData) => `Created item ${responseData.id}`,
+         errorMessage: true // Use default error message from API
+       }
+     );
+     ```
+  4. **Handling Return Value**:
+     ```javascript
+     const [data, error] = await callApi(params);
+     if (data) {
+       // Handle success
+     } else if (error) {
+       // Handle error
+     }
+     ```
+
+### 5. `initOptions` (Object)
+
+- **Properties**:
+  - `initLoading` (Boolean): Set initial loading state
+  - `callOnInterval` (Object): Configure interval-based calls
+    - `interval` (Number): Milliseconds between calls
+    - `breakInterval` (Function): Determine when to stop interval
+- **Use Cases**:
+  1. **Initial Loading State**:
+     ```javascript
+     const { loading } = useApiCaller(fetchInitialData, { initLoading: true });
+     ```
+  2. **Polling**:
+     ```javascript
+     const { callApi } = useApiCaller(pollStatus, {
+       callOnInterval: { 
+         interval: 5000,
+         breakInterval: ([data]) => data?.status === 'completed'
+       }
+     });
+     callApi();
+     ```
+
+This documentation provides a comprehensive overview of the `useApiCaller` hook, its parameters, return values, and various use cases. It should help developers understand how to effectively use this hook in their React applications for managing API calls efficiently.
