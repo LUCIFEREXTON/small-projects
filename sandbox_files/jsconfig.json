@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "baseUrl": "./app/javascript/horizon",
+    "paths": {
+      "@shadcn-components/*": ["./src/shared/shadcn/components/ui/*"],
+      "@shadcn/*": ["./src/shared/shadcn/*"],
+      "@shared/*": ["./src/shared/*"],
+      "@app/*": ["./src/*"],
+      "@tests/*": ["./tests/*"]
+    }
+  },
+  "include": ["./app/javascript/horizon/**/*"],
+  "exclude": ["node_modules"]
+}
