@@ -1,0 +1,80 @@
+.diff-view {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Ensure the Monaco diff editor takes up all available space */
+.diff-view .monaco-diff-editor {
+  height: 100% !important;
+  width: 100% !important;
+}
+
+/* Style for the gutter between the two editors */
+.diff-view .monaco-diff-editor .diffOverview {
+  background-color: #3c3c3c;
+}
+
+/* Style for diff indicators */
+.diff-view .monaco-diff-editor .diffOverview .diff-added,
+.diff-view .monaco-diff-editor .diffOverview .diff-removed {
+  opacity: 0.8;
+}
+
+.diff-view .monaco-diff-editor .diffOverview .diff-added {
+  background-color: #37ad37;
+}
+
+.diff-view .monaco-diff-editor .diffOverview .diff-removed {
+  background-color: #f14c4c;
+}
+
+/* Style for line numbers */
+.diff-view .monaco-diff-editor .line-numbers {
+  color: #858585;
+}
+
+/* Style for diff line highlights */
+.diff-view .monaco-diff-editor .diff-review-line-number {
+  color: #c5c5c5;
+}
+
+.diff-view .monaco-diff-editor .insert-sign,
+.diff-view .monaco-diff-editor .delete-sign {
+  opacity: 0.7;
+}
+
+.diff-view .monaco-diff-editor .insert-sign {
+  border-left: 3px solid #37ad37;
+}
+
+.diff-view .monaco-diff-editor .delete-sign {
+  border-left: 3px solid #f14c4c;
+}
+
+/* Ensure consistent scrollbar styling */
+.diff-view .monaco-scrollable-element>.scrollbar>.slider {
+  background: rgba(121, 121, 121, 0.4) !important;
+}
+
+.diff-view .monaco-scrollable-element>.scrollbar>.slider:hover {
+  background: rgba(100, 100, 100, 0.7) !important;
+}
+
+/* Style for the separator between the two editors */
+.diff-view .monaco-diff-editor .diffViewport {
+  background-color: #4a4a4a;
+}
+
+/* Ensure consistent font styling */
+.diff-view .monaco-diff-editor,
+.diff-view .monaco-diff-editor .monaco-editor {
+  font-family: "Consolas", "Courier New", monospace;
+}
+
+/* Add some padding to the content */
+.diff-view .monaco-diff-editor .monaco-editor .view-lines {
+  padding-top: 5px;
+}

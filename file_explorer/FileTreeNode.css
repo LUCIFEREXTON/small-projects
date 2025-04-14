@@ -1,0 +1,95 @@
+.file-tree-node {
+  padding: 5px 0;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.2s;
+}
+
+.file-tree-node .node-content {
+  display: flex;
+  align-items: center;
+}
+
+.file-tree-node .node-content:hover {
+  background-color: #333333;
+}
+
+.file-tree-node .toggle {
+  width: 20px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.file-tree-node .icon {
+  margin-right: 5px;
+}
+
+.file-tree-node .name {
+  flex-grow: 1;
+}
+
+.file-tree-node .actions {
+  display: flex;
+  gap: 5px;
+}
+
+.file-tree-node .actions button {
+  padding: 2px 5px;
+  font-size: 12px;
+  background-color: #252526;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.file-tree-node .actions button:hover {
+  background-color: #1e1e1e;
+}
+
+.file-tree-node .children {
+  padding-left: 20px;
+}
+
+.file-tree-node.folder>.node-content {
+  font-weight: bold;
+}
+
+.file-tree-node.file>.node-content {
+  font-weight: normal;
+}
+
+.file-tree-node.expanded>.node-content>.toggle {
+  transform: rotate(90deg);
+}
+
+.context-menu {
+  background-color: #1e1e1e;
+  border: 1px solid #454545;
+  border-radius: 4px;
+  padding: 5px 0;
+  z-index: 1000;
+}
+
+.context-menu button {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: #d4d4d4;
+  cursor: pointer;
+}
+
+.context-menu button:hover {
+  background-color: #2a2d2e;
+}
+
+.context-menu-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 999;
+}

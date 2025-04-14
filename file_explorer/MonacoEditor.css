@@ -1,0 +1,10 @@
+.monaco-editor-wrapper {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.monaco-editor-wrapper .monaco-editor {
+  width: 100% !important;
+  height: 100% !important;
+}
